@@ -47,6 +47,15 @@ app.innerHTML = `
 
     <div class="result" id="result"></div>
   </div>
+
+  <div class="modal" id="modal" role="dialog" aria-modal="true">
+    <div class="card">
+      <div class="card__emoji" id="itemEmoji">🥣</div>
+      <div class="card__name" id="itemName">…</div>
+      <div class="card__rarity" id="itemRarity" data-r="N">ノーマル</div>
+      <button class="btn" id="close" type="button">OK</button>
+    </div>
+  </div>
 </div>
 `
 
@@ -56,6 +65,12 @@ const failsEl = document.querySelector<HTMLSpanElement>('#fails')!
 const pityEl = document.querySelector<HTMLDivElement>('#pity')!
 const resultEl = document.querySelector<HTMLDivElement>('#result')!
 const holdBtn = document.querySelector<HTMLButtonElement>('#hold')!
+
+const modal = document.querySelector<HTMLDivElement>('#modal')!
+const itemEmojiEl = document.querySelector<HTMLDivElement>('#itemEmoji')!
+const itemNameEl = document.querySelector<HTMLDivElement>('#itemName')!
+const itemRarityEl = document.querySelector<HTMLDivElement>('#itemRarity')!
+const closeBtn = document.querySelector<HTMLButtonElement>('#close')!
 
 // --- Canvas ---
 const ctx = canvas.getContext('2d', { alpha: false })!
@@ -98,6 +113,44 @@ function updateHud(progress01: number) {
   pityEl.textContent = state.pityFails >= 6 ? '確定: あり' : '確定: なし'
 }
 
+// --- Items (cute cereal / food) ---
+type Item = { name: string; emoji: string }
+const ITEM_POOL: Record<Rarity, Item[]> = {
+  N: [
+    { name: 'コーンフレーク', emoji: '🌽' },
+    { name: 'ミルク', emoji: '🥛' },
+    { name: 'いちご', emoji: '🍓' },
+    { name: 'バナナ', emoji: '🍌' },
+    { name: 'はちみつ', emoji: '🍯' },
+  ],
+  R: [
+    { name: 'プロテインシリアル', emoji: '🥣' },
+    { name: 'チョコグラノーラ', emoji: '🍫' },
+    { name: 'ナッツミックス', emoji: '🥜' },
+  ],
+  SR: [
+    { name: 'キラキラ限定シリアル', emoji: '✨🥣' },
+    { name: '伝説のチョコボウル', emoji: '👑🍫' },
+  ],
+}
+
+function openItemModal(r: Rarity, item: Item, header?: string) {
+  itemEmojiEl.textContent = item.emoji
+  itemNameEl.textContent = header ? `${header} ${item.name}` : item.name
+  itemRarityEl.textContent = r === 'SR' ? '激アツ' : r === 'R' ? 'レア' : 'ノーマル'
+  itemRarityEl.dataset.r = r
+  modal.classList.add('is-open')
+}
+
+function closeModal() {
+  modal.classList.remove('is-open')
+}
+
+closeBtn.addEventListener('click', closeModal)
+modal.addEventListener('click', (e) => {
+  if (e.target === modal) closeModal()
+})
+
 // --- Particles ---
 type P = { x: number; y: number; vx: number; vy: number; life: number; max: number; hue: number; r: number }
 const ps: P[] = []
@@ -130,8 +183,10 @@ function doRoll(progress01: number) {
   // pity: 6 failures -> guaranteed win with special item
   if (state.pityFails >= 6) {
     state.pityFails = 0
-    setResult('確定演出！おめでとう！', 'pity')
+    setResult('確定演出！', 'pity')
     vibrate([30, 40, 20])
+    const item = { name: '確定券', emoji: '🎟️' }
+    openItemModal('SR', item, '確定！')
     return { win: true, rarity: 'SR' as Rarity, pity: true }
   }
 
@@ -141,6 +196,9 @@ function doRoll(progress01: number) {
     const r = rarityFromProgress(progress01)
     setResult(r === 'SR' ? '大当たり！！' : r === 'R' ? '当たり！' : '当たり', 'ok')
     vibrate([20, 30, 10])
+    const pool = ITEM_POOL[r]
+    const item = pool[Math.floor(Math.random() * pool.length)]
+    openItemModal(r, item)
     return { win: true, rarity: r, pity: false }
   }
 
