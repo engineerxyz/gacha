@@ -6,8 +6,13 @@ type State = {
   holding: boolean
   holdMs: number
   pityFails: number // 0..6
-  lastResult?: { win: boolean; rarity?: Rarity }
 }
+
+type Outcome =
+  | { win: true; rarity: Rarity; pity: boolean; item: Item; header?: string }
+  | { win: false; pity: boolean; item: Item; header?: string }
+
+type Phase = 'idle' | 'charging' | 'reveal1' | 'reveal2' | 'reveal3'
 
 const WIN_RATE = 0.16
 const HOLD_FULL_MS = 1400
@@ -94,6 +99,7 @@ resize()
 // --- Juicy helpers ---
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x))
 const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3)
+const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
 
 function vibrate(pattern: number | number[]) {
   // best-effort
@@ -134,11 +140,11 @@ const ITEM_POOL: Record<Rarity, Item[]> = {
   ],
 }
 
-function openItemModal(r: Rarity, item: Item, header?: string) {
+function openItemModal(r: Rarity | 'NG', item: Item, header?: string) {
   itemEmojiEl.textContent = item.emoji
   itemNameEl.textContent = header ? `${header} ${item.name}` : item.name
-  itemRarityEl.textContent = r === 'SR' ? '激アツ' : r === 'R' ? 'レア' : 'ノーマル'
-  itemRarityEl.dataset.r = r
+  itemRarityEl.textContent = r === 'SR' ? '激アツ' : r === 'R' ? 'レア' : r === 'N' ? 'ノーマル' : '…'
+  itemRarityEl.dataset.r = r === 'NG' ? 'N' : r
   modal.classList.add('is-open')
 }
 
@@ -179,42 +185,56 @@ function rarityFromProgress(p: number): Rarity {
   return 'N'
 }
 
-function doRoll(progress01: number) {
-  // pity: 6 failures -> guaranteed win with special item
+function pick<T>(arr: T[]) {
+  return arr[Math.floor(Math.random() * arr.length)]
+}
+
+function computeOutcome(progress01: number): Outcome {
+  // 6 failures -> special payout
   if (state.pityFails >= 6) {
     state.pityFails = 0
-    setResult('確定演出！', 'pity')
-    vibrate([30, 40, 20])
-    const item = { name: '確定券', emoji: '🎟️' }
-    openItemModal('SR', item, '確定！')
-    return { win: true, rarity: 'SR' as Rarity, pity: true }
+    return {
+      win: true,
+      rarity: 'SR',
+      pity: true,
+      item: { name: '確定券', emoji: '🎟️' },
+      header: '確定！',
+    }
   }
 
   const win = Math.random() < WIN_RATE
   if (win) {
     state.pityFails = 0
     const r = rarityFromProgress(progress01)
-    setResult(r === 'SR' ? '大当たり！！' : r === 'R' ? '当たり！' : '当たり', 'ok')
-    vibrate([20, 30, 10])
-    const pool = ITEM_POOL[r]
-    const item = pool[Math.floor(Math.random() * pool.length)]
-    openItemModal(r, item)
-    return { win: true, rarity: r, pity: false }
+    return {
+      win: true,
+      rarity: r,
+      pity: false,
+      item: pick(ITEM_POOL[r]),
+    }
   }
 
   state.pityFails = Math.min(6, state.pityFails + 1)
-  setResult('ハズレ…', 'ng')
-  vibrate(12)
-  return { win: false as const, pity: false }
+  return {
+    win: false,
+    pity: false,
+    item: { name: '空っぽボウル', emoji: '🥣' },
+    header: 'ハズレ…',
+  }
 }
 
-// --- Input: hold-to-charge ---
+// --- Input: hold-to-charge + cinematic reveal ---
 let lastT = performance.now()
 let hitstopMs = 0
 let shake = 0
+let phase: Phase = 'idle'
+let phaseMs = 0
+let pending: Outcome | null = null
+let revealProgress = 0 // 0..1
 
 function startHold() {
   state.holding = true
+  phase = 'charging'
   holdBtn.classList.add('is-holding')
   setResult('…', 'idle')
   vibrate(8)
@@ -226,20 +246,12 @@ function endHold() {
   holdBtn.classList.remove('is-holding')
 
   const p = clamp01(state.holdMs / HOLD_FULL_MS)
-  const result = doRoll(p)
+  pending = computeOutcome(p)
 
-  // impact package
-  const cx = w * 0.5
-  const cy = h * 0.45
-  if (result.win) {
-    hitstopMs = result.pity ? 90 : 55
-    shake = result.pity ? 18 : 10
-    burst(cx, cy, result.pity ? 1 : p, result.pity ? 48 : result.rarity === 'SR' ? 52 : result.rarity === 'R' ? 200 : 32)
-  } else {
-    hitstopMs = 35
-    shake = 7
-    burst(cx, cy, 0.35, 210)
-  }
+  // start 3-step cinematic
+  phase = 'reveal1'
+  phaseMs = 0
+  revealProgress = 0
 
   state.holdMs = 0
 }
@@ -252,55 +264,54 @@ holdBtn.addEventListener('pointerdown', (e) => {
 
 holdBtn.addEventListener('pointerup', () => endHold())
 holdBtn.addEventListener('pointercancel', () => endHold())
-holdBtn.addEventListener('pointerleave', () => {
-  // allow slide-out without cancelling; keep holding
-})
 
 // --- Render loop ---
-function drawBG(t: number, progress01: number) {
-  // subtle animated gradient
+function drawBG(t: number, charge01: number) {
+  // pastel animated gradient
   const g = ctx.createLinearGradient(0, 0, w, h)
-  const base = 220 + Math.sin(t * 0.0005) * 10
-  const pulse = easeOutCubic(progress01)
-  g.addColorStop(0, `hsl(${base - 30}, 60%, ${10 + pulse * 10}%)`)
-  g.addColorStop(1, `hsl(${base + 40}, 70%, ${8 + pulse * 12}%)`)
+  const wobble = Math.sin(t * 0.0005) * 6
+  const pulse = easeOutCubic(charge01)
+  g.addColorStop(0, `hsl(${340 + wobble}, 90%, ${92 - pulse * 6}%)`)
+  g.addColorStop(1, `hsl(${210 + wobble}, 90%, ${92 - pulse * 6}%)`)
   ctx.fillStyle = g
   ctx.fillRect(0, 0, w, h)
 
   // vignette
-  const vg = ctx.createRadialGradient(w * 0.5, h * 0.5, Math.min(w, h) * 0.2, w * 0.5, h * 0.5, Math.max(w, h) * 0.7)
-  vg.addColorStop(0, 'rgba(0,0,0,0)')
-  vg.addColorStop(1, 'rgba(0,0,0,0.55)')
+  const vg = ctx.createRadialGradient(w * 0.5, h * 0.55, Math.min(w, h) * 0.15, w * 0.5, h * 0.55, Math.max(w, h) * 0.75)
+  vg.addColorStop(0, 'rgba(255,255,255,0)')
+  vg.addColorStop(1, 'rgba(43,42,51,0.18)')
   ctx.fillStyle = vg
   ctx.fillRect(0, 0, w, h)
 }
 
-function drawOrb(t: number, progress01: number) {
-  const p = easeOutCubic(progress01)
+function drawOrb(t: number, charge01: number) {
+  const p = easeOutCubic(charge01)
   const cx = w * 0.5
   const cy = h * 0.45
+
+  // when revealing, focus-in
+  const focus = phase.startsWith('reveal') ? easeInOut(revealProgress) : 0
 
   // anticipation squash while holding
   const sq = state.holding ? 1 - 0.04 * Math.sin(t * 0.02) : 1
 
-  // glow
-  const glowR = 58 + p * 90
+  const glowR = 62 + p * 85 + focus * 50
   const rg = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR)
-  rg.addColorStop(0, `hsla(${200 - p * 160}, 90%, 65%, ${0.25 + p * 0.25})`)
-  rg.addColorStop(1, 'rgba(0,0,0,0)')
+  rg.addColorStop(0, `hsla(${200 - p * 120}, 95%, 70%, ${0.16 + p * 0.24 + focus * 0.12})`)
+  rg.addColorStop(1, 'rgba(255,255,255,0)')
   ctx.fillStyle = rg
   ctx.beginPath()
   ctx.arc(cx, cy, glowR, 0, Math.PI * 2)
   ctx.fill()
 
-  // core orb
-  const orbR = 42 + p * 18
+  const orbR = 40 + p * 18 + focus * 10
   const og = ctx.createRadialGradient(cx - 12, cy - 14, 0, cx, cy, orbR)
-  og.addColorStop(0, `hsl(${190 - p * 120}, 90%, 72%)`)
-  og.addColorStop(1, `hsl(${230 + p * 40}, 70%, 35%)`)
+  og.addColorStop(0, `hsl(${190 - p * 90}, 95%, 78%)`)
+  og.addColorStop(1, `hsl(${240 + p * 20}, 70%, 50%)`)
+
   ctx.save()
   ctx.translate(cx, cy)
-  ctx.scale(1 + p * 0.06, sq - p * 0.02)
+  ctx.scale(1 + p * 0.06 + focus * 0.06, sq - p * 0.02)
   ctx.translate(-cx, -cy)
   ctx.fillStyle = og
   ctx.beginPath()
@@ -308,20 +319,38 @@ function drawOrb(t: number, progress01: number) {
   ctx.fill()
   ctx.restore()
 
-  // orbiting sparks while holding
-  if (state.holding) {
-    const rings = 12
+  // orbiting sparks while holding or revealing
+  const orbit = state.holding || phase === 'reveal1' || phase === 'reveal2'
+  if (orbit) {
+    const rings = 10
     for (let i = 0; i < rings; i++) {
       const a = t * 0.004 + (i / rings) * Math.PI * 2
-      const rr = orbR + 14 + p * 28
+      const rr = orbR + 14 + p * 26 + focus * 18
       const x = cx + Math.cos(a) * rr
       const y = cy + Math.sin(a) * rr * 0.55
-      ctx.fillStyle = `hsla(${200 - p * 140}, 90%, 70%, ${0.25 + p * 0.35})`
+      ctx.fillStyle = `hsla(${200 - p * 120}, 95%, 75%, ${0.22 + p * 0.28})`
       ctx.beginPath()
-      ctx.arc(x, y, 2.2 + p * 1.6, 0, Math.PI * 2)
+      ctx.arc(x, y, 2.1 + p * 1.3, 0, Math.PI * 2)
       ctx.fill()
     }
   }
+}
+
+function drawRevealOverlay() {
+  if (!phase.startsWith('reveal')) return
+  // curtain / flash vibe
+  const t = easeInOut(revealProgress)
+
+  if (phase === 'reveal2') {
+    const a = 0.22 + (1 - Math.abs(t * 2 - 1)) * 0.22
+    ctx.fillStyle = `rgba(255,255,255,${a})`
+    ctx.fillRect(0, 0, w, h)
+  }
+
+  // sparkly confetti band
+  const bandY = h * 0.45
+  ctx.fillStyle = `rgba(255,125,187,${0.08 * t})`
+  ctx.fillRect(0, bandY - 80, w, 160)
 }
 
 function drawParticles(dt: number) {
@@ -337,11 +366,36 @@ function drawParticles(dt: number) {
     p.x += p.vx
     p.y += p.vy
     const a = 1 - t
-    ctx.fillStyle = `hsla(${p.hue}, 95%, 70%, ${0.65 * a})`
+    ctx.fillStyle = `hsla(${p.hue}, 95%, 70%, ${0.55 * a})`
     ctx.beginPath()
     ctx.arc(p.x, p.y, p.r * (0.6 + a), 0, Math.PI * 2)
     ctx.fill()
   }
+}
+
+function resolveReveal() {
+  if (!pending) return
+  if (pending.win) {
+    setResult(pending.pity ? '確定演出！' : pending.rarity === 'SR' ? '大当たり！！' : pending.rarity === 'R' ? '当たり！' : '当たり', pending.pity ? 'pity' : 'ok')
+    vibrate(pending.pity ? [25, 40, 20] : [20, 25, 10])
+    const cx = w * 0.5
+    const cy = h * 0.45
+    hitstopMs = pending.pity ? 90 : 55
+    shake = pending.pity ? 18 : 10
+    burst(cx, cy, pending.pity ? 1 : 0.8, pending.pity ? 48 : pending.rarity === 'SR' ? 330 : pending.rarity === 'R' ? 250 : 200)
+    openItemModal(pending.rarity, pending.item, pending.header)
+  } else {
+    setResult('ハズレ…', 'ng')
+    vibrate(10)
+    const cx = w * 0.5
+    const cy = h * 0.45
+    hitstopMs = 35
+    shake = 7
+    burst(cx, cy, 0.35, 210)
+    // show something even on fail
+    openItemModal('NG', pending.item, pending.header)
+  }
+  pending = null
 }
 
 function frame(now: number) {
@@ -350,17 +404,48 @@ function frame(now: number) {
 
   if (hitstopMs > 0) {
     hitstopMs -= dt
-    // during hitstop: still render but don't advance hold meter too much
   }
 
+  // charge logic
   if (state.holding) {
-    // nonlinear fill: slow then fast
     const speed = 1 + Math.pow(state.holdMs / HOLD_FULL_MS, 1.6) * 2.2
     state.holdMs = Math.min(HOLD_FULL_MS, state.holdMs + dt * speed)
   }
 
-  const p01 = clamp01(state.holdMs / HOLD_FULL_MS)
-  updateHud(p01)
+  // reveal state machine
+  if (phase.startsWith('reveal')) {
+    phaseMs += dt
+    if (phase === 'reveal1') {
+      revealProgress = clamp01(phaseMs / 280)
+      if (phaseMs >= 280) {
+        phase = 'reveal2'
+        phaseMs = 0
+        revealProgress = 0
+        vibrate(8)
+      }
+    } else if (phase === 'reveal2') {
+      revealProgress = clamp01(phaseMs / 360)
+      if (phaseMs >= 360) {
+        phase = 'reveal3'
+        phaseMs = 0
+        revealProgress = 0
+      }
+    } else if (phase === 'reveal3') {
+      revealProgress = clamp01(phaseMs / 260)
+      if (phaseMs >= 120) {
+        // resolve near start of phase3
+        resolveReveal()
+      }
+      if (phaseMs >= 260) {
+        phase = 'idle'
+        phaseMs = 0
+        revealProgress = 0
+      }
+    }
+  }
+
+  const charge01 = clamp01(state.holdMs / HOLD_FULL_MS)
+  updateHud(charge01)
 
   // shake
   const s = shake
@@ -370,8 +455,9 @@ function frame(now: number) {
 
   ctx.save()
   ctx.translate(ox, oy)
-  drawBG(now, p01)
-  drawOrb(now, p01)
+  drawBG(now, charge01)
+  drawOrb(now, charge01)
+  drawRevealOverlay()
   drawParticles(dt)
   ctx.restore()
 
