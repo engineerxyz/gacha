@@ -1,44 +1,9 @@
 import Phaser from 'phaser'
 
-type Rarity = 'N' | 'R' | 'SR'
+import type { Item, Outcome, Rarity } from './logic'
+import { computeOutcome } from './logic'
 
-type Item = { name: string; emoji: string }
-
-type Outcome =
-  | { win: true; rarity: Rarity; pity: boolean; item: Item; header?: string }
-  | { win: false; pity: boolean; item: Item; header?: string }
-
-const WIN_RATE = 0.16
 const HOLD_FULL_MS = 1400
-
-const ITEM_POOL: Record<Rarity, Item[]> = {
-  N: [
-    { name: 'コーンフレーク', emoji: '🌽' },
-    { name: 'ミルク', emoji: '🥛' },
-    { name: 'いちご', emoji: '🍓' },
-    { name: 'バナナ', emoji: '🍌' },
-    { name: 'はちみつ', emoji: '🍯' },
-  ],
-  R: [
-    { name: 'プロテインシリアル', emoji: '🥣' },
-    { name: 'チョコグラノーラ', emoji: '🍫' },
-    { name: 'ナッツミックス', emoji: '🥜' },
-  ],
-  SR: [
-    { name: 'キラキラ限定シリアル', emoji: '✨🥣' },
-    { name: '伝説のチョコボウル', emoji: '👑🍫' },
-  ],
-}
-
-function pick<T>(arr: T[]) {
-  return arr[Math.floor(Math.random() * arr.length)]
-}
-
-function rarityFromProgress(p: number): Rarity {
-  if (p > 0.92) return 'SR'
-  if (p > 0.66) return 'R'
-  return 'N'
-}
 
 function makeRoundedRectTexture(scene: Phaser.Scene, key: string, w: number, h: number, r: number, fill: number, alpha = 1, stroke?: { color: number; width: number; alpha?: number }) {
   if (scene.textures.exists(key)) return
@@ -210,29 +175,15 @@ class MainScene extends Phaser.Scene {
     this.holdBtn.setScale(1)
 
     const p = Phaser.Math.Clamp(this.holdMs / HOLD_FULL_MS, 0, 1)
-    this.pending = this.computeOutcome(p)
+    const s = { pityFails: this.pityFails }
+    this.pending = computeOutcome(s, p)
+    this.pityFails = s.pityFails
 
     this.phase = 'reveal1'
     this.phaseMs = 0
     this.holdMs = 0
     this.updateHud()
   }
-
-  private computeOutcome(progress01: number): Outcome {
-    if (this.pityFails >= 6) {
-      this.pityFails = 0
-      return { win: true, rarity: 'SR', pity: true, item: { name: '確定券', emoji: '🎟️' }, header: '確定！' }
-    }
-    const win = Math.random() < WIN_RATE
-    if (win) {
-      this.pityFails = 0
-      const r = rarityFromProgress(progress01)
-      return { win: true, rarity: r, pity: false, item: pick(ITEM_POOL[r]) }
-    }
-    this.pityFails = Math.min(6, this.pityFails + 1)
-    return { win: false, pity: false, item: { name: '空っぽボウル', emoji: '🥣' }, header: 'ハズレ…' }
-  }
-
   private resolveReveal() {
     if (!this.pending) return
     const cx = this.scale.width / 2
