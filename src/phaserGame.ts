@@ -387,8 +387,8 @@ export function startPhaserGame(parent: HTMLElement) {
   return new Phaser.Game({
     type: Phaser.CANVAS,
     parent,
-    width: '100%',
-    height: '100%',
+    width: 360,
+    height: 640,
     backgroundColor: '#fff1f7',
     scale: {
       mode: Phaser.Scale.RESIZE,
