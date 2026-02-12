@@ -385,7 +385,7 @@ class MainScene extends Phaser.Scene {
 
 export function startPhaserGame(parent: HTMLElement) {
   return new Phaser.Game({
-    type: Phaser.AUTO,
+    type: Phaser.CANVAS,
     parent,
     width: '100%',
     height: '100%',
