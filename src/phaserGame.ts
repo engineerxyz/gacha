@@ -31,6 +31,12 @@ class MainScene extends Phaser.Scene {
   private orb!: Phaser.GameObjects.Arc
   private glow!: Phaser.GameObjects.Arc
   private sparkParticles!: Phaser.GameObjects.Particles.ParticleEmitter
+  private chargeParticles!: any
+  private flash!: Phaser.GameObjects.Rectangle
+
+  private audioCtx: AudioContext | null = null
+  private osc: OscillatorNode | null = null
+  private gain: GainNode | null = null
 
   private meterFill!: Phaser.GameObjects.Image
   private meterW = 360
@@ -67,6 +73,10 @@ class MainScene extends Phaser.Scene {
     this.glow = this.add.circle(W / 2, H * 0.40, 120, 0xffa8d0, 0.22)
     this.orb = this.add.circle(W / 2, H * 0.40, 54, 0x7dd6ff, 1)
 
+    // screen flash overlay
+    this.flash = this.add.rectangle(0, 0, W, H, 0xffffff, 0).setOrigin(0)
+    this.flash.setDepth(10_000)
+
     // particles
     const particles = this.add.particles(0, 0, '__DEFAULT', {
       speed: { min: 80, max: 240 },
@@ -79,6 +89,26 @@ class MainScene extends Phaser.Scene {
       emitting: false,
     })
     this.sparkParticles = particles
+    // charge suction particles (emit around orb, move into center)
+    const chargeMgr: any = this.add.particles(0, 0, '__DEFAULT')
+
+    const ring = new Phaser.Geom.Circle(W / 2, H * 0.40, 96)
+    const EdgeZoneCtor: any = (Phaser.GameObjects.Particles.Zones as any).EdgeZone
+    const ringZone = new EdgeZoneCtor(ring, 24)
+
+    this.chargeParticles = chargeMgr.createEmitter({
+      emitting: false,
+      frequency: 22,
+      emitZone: ringZone,
+      moveToX: W / 2,
+      moveToY: H * 0.40,
+      speed: { min: 40, max: 120 },
+      lifespan: { min: 240, max: 420 },
+      scale: { start: 0.55, end: 0 },
+      alpha: { start: 0.65, end: 0 },
+      blendMode: 'ADD',
+      tint: [0xff7dbb, 0x7dd6ff, 0x8b7dff],
+    })
 
     // title
     this.add
@@ -148,6 +178,7 @@ class MainScene extends Phaser.Scene {
       const { width, height } = gameSize
       this.bg.setSize(width, height)
       modalBg.setSize(width, height)
+      this.flash.setSize(width, height)
       this.cameras.main.setViewport(0, 0, width, height)
     })
   }
@@ -164,8 +195,23 @@ class MainScene extends Phaser.Scene {
     this.holding = true
     this.phase = 'charging'
     this.resultText.setText('…')
+
+    // haptic tick (best-effort)
+    try {
+      // @ts-ignore
+      navigator?.vibrate?.(8)
+    } catch {}
+
+    // unlock + start charge tone
+    this.ensureAudio()
+    this.startChargeTone()
+
+    // start suction particles
+    this.chargeParticles.start()
+
+    // button pulse
     this.tweens.killTweensOf(this.holdBtn)
-    this.tweens.add({ targets: this.holdBtn, scale: 1.03, yoyo: true, repeat: -1, duration: 280, ease: 'Sine.easeInOut' })
+    this.tweens.add({ targets: this.holdBtn, scale: 1.03, yoyo: true, repeat: -1, duration: 260, ease: 'Sine.easeInOut' })
   }
 
   private endHold() {
@@ -178,6 +224,16 @@ class MainScene extends Phaser.Scene {
     const s = { pityFails: this.pityFails }
     this.pending = computeOutcome(s, p)
     this.pityFails = s.pityFails
+
+    
+    // stop charge tone
+    this.stopChargeTone()
+
+    // quick camera punch + flash + hitstop
+    this.cameraPunch()
+
+    // stop suction particles
+    this.chargeParticles.stop()
 
     this.phase = 'reveal1'
     this.phaseMs = 0
@@ -219,6 +275,61 @@ class MainScene extends Phaser.Scene {
     this.modal.setVisible(false)
   }
 
+  private ensureAudio() {
+    if (this.audioCtx) return
+    const Ctx = (globalThis.AudioContext || (globalThis as any).webkitAudioContext) as typeof AudioContext | undefined
+    if (!Ctx) return
+    this.audioCtx = new Ctx()
+  }
+
+  private startChargeTone() {
+    if (!this.audioCtx) return
+    try {
+      if (this.audioCtx.state === 'suspended') this.audioCtx.resume()
+    } catch {}
+    try {
+      this.osc?.stop()
+    } catch {}
+    this.osc = this.audioCtx.createOscillator()
+    this.gain = this.audioCtx.createGain()
+    this.osc.type = 'sine'
+    this.osc.frequency.setValueAtTime(220, this.audioCtx.currentTime)
+    this.gain.gain.setValueAtTime(0.0001, this.audioCtx.currentTime)
+    this.gain.gain.exponentialRampToValueAtTime(0.05, this.audioCtx.currentTime + 0.08)
+    this.osc.connect(this.gain)
+    this.gain.connect(this.audioCtx.destination)
+    this.osc.start()
+  }
+
+  private stopChargeTone() {
+    if (!this.audioCtx || !this.osc || !this.gain) return
+    const t = this.audioCtx.currentTime
+    // little blip
+    this.osc.frequency.exponentialRampToValueAtTime(520, t + 0.05)
+    this.gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.09)
+    try {
+      this.osc.stop(t + 0.1)
+    } catch {}
+    this.osc = null
+    this.gain = null
+  }
+
+  private cameraPunch() {
+    const cam = this.cameras.main
+    this.tweens.killTweensOf(cam)
+    cam.setZoom(1)
+    this.tweens.add({ targets: cam, zoom: 1.035, duration: 90, yoyo: true, ease: 'Sine.easeOut' })
+
+    // flash
+    this.flash.setAlpha(0)
+    this.tweens.add({ targets: this.flash, alpha: 0.35, duration: 60, yoyo: true, ease: 'Sine.easeOut' })
+
+    // hitstop-ish (timeScale)
+    const old = this.time.timeScale
+    this.time.timeScale = 0.12
+    this.time.delayedCall(70, () => { this.time.timeScale = old })
+  }
+
   update(_time: number, delta: number) {
     if (this.holding) {
       const p = Phaser.Math.Clamp(this.holdMs / HOLD_FULL_MS, 0, 1)
@@ -229,6 +340,14 @@ class MainScene extends Phaser.Scene {
       const t = Phaser.Math.Clamp(this.holdMs / HOLD_FULL_MS, 0, 1)
       this.glow.setAlpha(0.18 + t * 0.22)
       this.glow.setRadius(120 + t * 80)
+
+      // audio pitch ramp
+      if (this.audioCtx && this.osc) {
+        const f = 220 + t * 520
+        try {
+          this.osc.frequency.setTargetAtTime(f, this.audioCtx.currentTime, 0.03)
+        } catch {}
+      }
     }
 
     if (this.phase.startsWith('reveal')) {
