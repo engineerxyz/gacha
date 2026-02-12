@@ -90,16 +90,12 @@ class MainScene extends Phaser.Scene {
     })
     this.sparkParticles = particles
     // charge suction particles (emit around orb, move into center)
-    const chargeMgr: any = this.add.particles(0, 0, '__DEFAULT')
-
+    // NOTE: Phaser 3.90 removed createEmitter() on ParticleEmitterManager, so we create emitter directly.
     const ring = new Phaser.Geom.Circle(W / 2, H * 0.40, 96)
-    const EdgeZoneCtor: any = (Phaser.GameObjects.Particles.Zones as any).EdgeZone
-    const ringZone = new EdgeZoneCtor(ring, 24)
-
-    this.chargeParticles = chargeMgr.createEmitter({
+    const chargeEmitterConfig: any = {
       emitting: false,
       frequency: 22,
-      emitZone: ringZone,
+      emitZone: { type: 'edge', source: ring, quantity: 2 },
       moveToX: W / 2,
       moveToY: H * 0.40,
       speed: { min: 40, max: 120 },
@@ -108,7 +104,8 @@ class MainScene extends Phaser.Scene {
       alpha: { start: 0.65, end: 0 },
       blendMode: 'ADD',
       tint: [0xff7dbb, 0x7dd6ff, 0x8b7dff],
-    })
+    }
+    this.chargeParticles = this.add.particles(0, 0, '__DEFAULT', chargeEmitterConfig)
 
     // title
     this.add
